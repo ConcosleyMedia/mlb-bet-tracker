@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Process queued messages and send to Whop forums"""
+"""Process queued messages and send to Whop forums - PRODUCTION VERSION"""
 
 import sys
 import os
@@ -16,7 +16,9 @@ from src.message_generator import MessageGenerator
 
 def setup_logging():
     """Configure logging for message processing"""
-    log_file = os.path.join(os.path.dirname(__file__), '..', 'logs', 'message_processing.log')
+    log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, 'message_processing.log')
     
     logging.basicConfig(
         level=logging.INFO,
@@ -81,6 +83,10 @@ async def process_message_queue():
                     generated = generator.generate_milestone_message(msg, msg['community_name'])
                 elif msg['message_type'] == 'won':
                     generated = generator.generate_win_message(msg, msg['community_name'])
+                elif msg['message_type'] == 'streak':
+                    generated = generator.generate_streak_message(msg, msg['community_name'])
+                elif msg['message_type'] == 'marketing':
+                    generated = generator.generate_marketing_message(msg, msg['community_name'])
                 else:
                     # Use pre-generated content
                     generated = {
@@ -88,7 +94,7 @@ async def process_message_queue():
                         'content': msg['message_content']
                     }
                 
-                # Post to appropriate community
+                # Post to appropriate community using the WORKING methods
                 success = False
                 
                 if msg['community_name'] == 'StatEdge Premium':
@@ -167,9 +173,5 @@ async def main():
         logger.error(f"💥 Critical error in message processing: {e}")
         sys.exit(1)
 
-def sync_main():
-    """Synchronous wrapper for async main"""
-    asyncio.run(main())
-
 if __name__ == "__main__":
-    sync_main()
+    asyncio.run(main())

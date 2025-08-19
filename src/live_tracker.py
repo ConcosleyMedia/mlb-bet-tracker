@@ -206,11 +206,22 @@ class LiveGameTracker:
                     ))
     
     def check_bet_progress(self, bet: Dict) -> Dict:
-        """Check progress on a specific bet with detailed tracking"""
+        """Check progress on a specific bet with smart milestone logic"""
         bet_type = bet['bet_type'].lower()
         current_value = 0
         game_id = bet['game_id']
         player_id = bet.get('player_id') or bet.get('pitcher_id')
+        
+        # Get previous tracking data
+        prev_tracking = db.fetchone("""
+            SELECT current_value, milestone_alerts, alert_sent
+            FROM bet_tracking 
+            WHERE bet_id = %s
+        """, (bet['bet_id'],))
+        
+        prev_value = float(prev_tracking[0]) if prev_tracking else 0
+        milestone_alerts = prev_tracking[1] if prev_tracking else {}
+        alerts_sent = len(milestone_alerts) if milestone_alerts else 0
         
         # Map bet types to database columns
         stat_mapping = {
@@ -270,6 +281,72 @@ class LiveGameTracker:
         
         # Determine if bet is hit based on operator
         operator = bet.get('operator', 'over')
+        
+        # Get game status for smart milestone logic
+        game_status = db.fetchone("""
+            SELECT inning, top_bottom, status
+            FROM games WHERE game_id = %s
+        """, (game_id,))
+        
+        game_status = {
+            'inning': game_status[0] if game_status else 1,
+            'top_bottom': game_status[1] if game_status else 'top',
+            'status': game_status[2] if game_status else 'Live'
+        }
+        
+        # Smart milestone detection based on bet type
+        milestone_hit = None
+        milestone_type = None
+        
+        # Player props: Update on first occurrence
+        if bet_type in ['hrs', 'home runs', 'hits', 'h', 'rbis', 'rbi', 'sb', 'stolen bases']:
+            target = float(bet.get('target_value', 2))
+            
+            # First milestone: First occurrence (if target > 1)
+            if target > 1 and prev_value == 0 and current_value >= 1 and alerts_sent == 0:
+                milestone_hit = 1
+                milestone_type = 'first_progress'
+            
+            # Second milestone: Near miss/last chance (late innings)
+            elif target > current_value and game_status.get('inning', 1) >= 7 and alerts_sent < 2:
+                if current_value == target - 1:
+                    milestone_hit = 'last_chance'
+                    milestone_type = 'last_chance'
+        
+        # Strikeouts: Update at key thresholds
+        elif bet_type in ['ks', 'strikeouts']:
+            target = float(bet.get('target_value', 6))
+            
+            # First update at ~50% (shows momentum)
+            if current_value >= target * 0.5 and prev_value < target * 0.5 and alerts_sent == 0:
+                milestone_hit = current_value
+                milestone_type = 'halfway'
+            
+            # Second update at 80% or last K needed
+            elif current_value >= target * 0.8 and prev_value < target * 0.8 and alerts_sent < 2:
+                milestone_hit = current_value
+                milestone_type = 'near_complete'
+        
+        # Moneyline: Update on lead changes
+        elif bet_type in ['moneyline', 'ml']:
+            if current_value == 1 and prev_value == 0 and alerts_sent == 0:
+                milestone_hit = 'took_lead'
+                milestone_type = 'lead_change'
+        
+        # Spread: Update when first covered
+        elif bet_type == 'spread':
+            if current_value >= target and prev_value < target and alerts_sent == 0:
+                milestone_hit = 'covering'
+                milestone_type = 'spread_covered'
+        
+        # Totals: Update at 75% only
+        elif bet_type == 'total':
+            target = float(bet.get('target_value', 8.5))
+            if current_value >= target * 0.75 and prev_value < target * 0.75 and alerts_sent == 0:
+                milestone_hit = current_value
+                milestone_type = 'nearing_total'
+        
+        # Check if bet is hit
         is_hit = False
         
         if operator == 'over':
@@ -281,27 +358,19 @@ class LiveGameTracker:
         elif operator is None and bet_type in ['moneyline', 'ml']:
             is_hit = current_value == 1
         
-        # Check if this is a new milestone
-        last_progress = float(bet.get('last_progress') or 0)
-        milestone_hit = None
-        
-        for threshold in self.milestone_thresholds:
-            threshold_pct = threshold * 100
-            if last_progress < threshold_pct <= progress:
-                milestone_hit = threshold
-                break
-        
         return {
             'bet_id': bet['bet_id'],
             'game_id': game_id,
             'current_value': current_value,
             'target_value': target,
-            'progress_percentage': min(progress, 100),
+            'progress_percentage': min((current_value / target * 100) if target > 0 else 0, 100),
             'is_hit': is_hit,
             'operator': operator,
             'milestone_hit': milestone_hit,
-            'last_value': bet.get('last_value', 0),
-            'value_changed': current_value != bet.get('last_value', 0)
+            'milestone_type': milestone_type,
+            'last_value': prev_value,
+            'value_changed': current_value != prev_value,
+            'alerts_sent': alerts_sent
         }
     
     def update_bet_tracking(self, bet: Dict, progress: Dict, game_status: Dict):
@@ -368,26 +437,72 @@ class LiveGameTracker:
                 WHERE bet_id = %s
             """, (new_status, progress['current_value'], bet['bet_id']))
     
-    def queue_message(self, bet: Dict, progress: Dict, message_type: str):
-        """Queue a message for sending to community"""
+    def queue_message(self, bet: Dict, progress: Dict, message_type: str, game_status: Dict):
+        """Queue contextual messages based on smart milestones"""
         
-        # Determine message content based on type
-        if message_type == 'milestone':
-            milestone_pct = int(progress['milestone_hit'] * 100)
-            message_title = f"🔥 {bet['player_name']} - {milestone_pct}% Complete!"
-            message_content = f"{bet['player_name']} has {progress['current_value']} " \
-                            f"toward {progress['target_value']} {bet['bet_type']} " \
-                            f"({progress['progress_percentage']:.0f}%)"
+        # Skip if we've already sent max updates (1-2 based on bet value)
+        max_updates = 2 if bet.get('units', 1) >= 3 or bet.get('community_name') == 'StatEdge Premium' else 1
+        if progress.get('alerts_sent', 0) >= max_updates and message_type != 'won':
+            return
+        
+        # Generate contextual message based on milestone type
+        milestone_type = progress.get('milestone_type')
+        
+        if message_type == 'milestone' and milestone_type:
+            if milestone_type == 'first_progress':
+                # Harper hits, HRs, RBIs
+                message_title = f"⚾ {bet['player_name']} gets his first!"
+                message_content = f"{bet['player_name']} has {int(progress['current_value'])} " \
+                                f"of {int(progress['target_value'])} {bet['bet_type']}! " \
+                                f"{int(progress['target_value'] - progress['current_value'])} more to go 🎯"
+            
+            elif milestone_type == 'halfway':
+                # Strikeouts momentum
+                message_title = f"🔥 {bet['player_name']} dealing!"
+                message_content = f"{int(progress['current_value'])} Ks through {game_status.get('inning', '?')} innings! " \
+                                f"Need {int(progress['target_value'] - progress['current_value'])} more 💪"
+            
+            elif milestone_type == 'last_chance':
+                # Late game opportunity
+                message_title = f"👀 {bet['player_name']} - Last chance!"
+                message_content = f"{bet['player_name']} needs 1 more {bet['bet_type']} - " \
+                                f"{game_status.get('inning', 'late')} inning, let's see some magic! ✨"
+            
+            elif milestone_type == 'lead_change':
+                # Moneyline update
+                team_name = bet.get('team_name') or 'Team'
+                message_title = f"💪 {team_name} takes the lead!"
+                score_info = f"{game_status.get('home_score', '?')}-{game_status.get('away_score', '?')}"
+                message_content = f"{team_name} now leading {score_info} in the {game_status.get('inning', '?')}th! 🎯"
+            
+            elif milestone_type == 'spread_covered':
+                # Spread update
+                team_name = bet.get('team_name') or 'Team'
+                message_title = f"📈 {team_name} covering the spread!"
+                message_content = f"{team_name} now covering {bet.get('target_value', 'the spread')}! Keep it going 🔥"
+            
+            elif milestone_type == 'nearing_total':
+                # Totals update
+                message_title = f"🎯 Total runs: {int(progress['current_value'])}"
+                message_content = f"Game at {int(progress['current_value'])} runs - " \
+                                f"need {int(progress['target_value'] - progress['current_value'])} more for the over!"
+            
+            elif milestone_type == 'near_complete':
+                # Near completion (strikeouts)
+                message_title = f"🔥 {bet['player_name']} - Almost there!"
+                message_content = f"{int(progress['current_value'])}/{int(progress['target_value'])} Ks! " \
+                                f"One more for the win 🎯"
+            
+            else:
+                # Fallback
+                return
         
         elif message_type == 'won':
-            message_title = f"🎉 BET WON - {bet['player_name'] or bet['raw_input']}"
-            message_content = f"{bet['raw_input']} ✅ Final: {progress['current_value']}/{progress['target_value']} " \
-                            f"| Odds: {bet['odds']} | Units: {bet['units']}"
-        
-        elif message_type == 'progress':
-            message_title = f"📈 Live Update - {bet['player_name']}"
-            message_content = f"{bet['player_name']} now has {progress['current_value']} " \
-                            f"{bet['bet_type']} (Target: {progress['target_value']})"
+            # Keep existing win message logic
+            message_title = f"🎉 WINNER - {bet.get('player_name') or bet.get('team_name', 'Bet')}"
+            message_content = f"{bet['raw_input']} ✅ HITS! " \
+                            f"Final: {progress['current_value']}/{progress['target_value']} " \
+                            f"| {bet['odds']} | {bet['units']}u 💰"
         
         else:
             return
@@ -406,11 +521,11 @@ class LiveGameTracker:
             message_content,
             bet['bet_id'],
             bet['game_id'],
-            2 if message_type == 'won' else 1,  # Higher priority for wins
-            datetime.now()  # Send immediately
+            2 if message_type == 'won' else 1,
+            datetime.now()
         ))
         
-        logger.info(f"Queued {message_type} message for bet {bet['bet_id']}")
+        logger.info(f"Queued {message_type} ({milestone_type}) message for bet {bet['bet_id']}")
     
     def track_all_live_games(self) -> Dict:
         """Main tracking loop for all live games - production ready"""
@@ -483,11 +598,11 @@ class LiveGameTracker:
                             
                             # Queue messages for milestones or wins
                             if progress['milestone_hit'] and not game_update.get('is_final'):
-                                self.queue_message(bet, progress, 'milestone')
+                                self.queue_message(bet, progress, 'milestone', game_update)
                                 tracking_summary['messages_queued'] += 1
                             
                             if progress['is_hit'] and bet['status'] != 'Won':
-                                self.queue_message(bet, progress, 'won')
+                                self.queue_message(bet, progress, 'won', game_update)
                                 tracking_summary['messages_queued'] += 1
                                 tracking_summary['winners'].append({
                                     'bet_id': bet['bet_id'],
@@ -499,7 +614,7 @@ class LiveGameTracker:
                             elif progress['value_changed'] and progress['progress_percentage'] > 0:
                                 # Only send progress updates for significant changes
                                 if abs(progress['current_value'] - progress.get('last_value', 0)) >= 1:
-                                    self.queue_message(bet, progress, 'progress')
+                                    self.queue_message(bet, progress, 'progress', game_update)
                                     tracking_summary['messages_queued'] += 1
                         
                         except Exception as e:
