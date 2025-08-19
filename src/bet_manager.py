@@ -177,26 +177,43 @@ class BetManager:
         }
     
     def clear_all_bets(self) -> int:
-        """Clear all bets from database"""
-        count = db.fetchone("SELECT COUNT(*) FROM bets")[0]
-        if count > 0:
+        """Clear all bets from database and related pending messages"""
+        bet_count = db.fetchone("SELECT COUNT(*) FROM bets")[0]
+        msg_count = db.fetchone("SELECT COUNT(*) FROM message_log WHERE delivery_status = 'pending'")[0]
+        
+        if bet_count > 0:
+            # Clear all bets
             db.execute("DELETE FROM bets")
-            logger.info(f"Cleared {count} bets from database")
-        return count
+            logger.info(f"Cleared {bet_count} bets from database")
+        
+        if msg_count > 0:
+            # Clear all pending messages
+            db.execute("DELETE FROM message_log WHERE delivery_status = 'pending'")
+            logger.info(f"Cleared {msg_count} pending messages")
+        
+        return bet_count
     
     def clear_todays_bets(self) -> int:
-        """Clear bets for today's games (based on game date)"""
+        """Clear bets for today's games and related pending messages"""
         from datetime import date
         today = date.today()
         
-        count = db.fetchone("""
+        bet_count = db.fetchone("""
             SELECT COUNT(*) 
             FROM bets b
             JOIN games g ON b.game_id = g.game_id
             WHERE g.game_date = %s
         """, (today,))[0]
         
-        if count > 0:
+        # Count messages for today's games
+        msg_count = db.fetchone("""
+            SELECT COUNT(*) 
+            FROM message_log m
+            JOIN games g ON m.game_id = g.game_id
+            WHERE g.game_date = %s AND m.delivery_status = 'pending'
+        """, (today,))[0]
+        
+        if bet_count > 0:
             # Delete bets for today's games
             db.execute("""
                 DELETE FROM bets 
@@ -204,8 +221,19 @@ class BetManager:
                     SELECT game_id FROM games WHERE game_date = %s
                 )
             """, (today,))
-            logger.info(f"Cleared {count} bets for today's games")
-        return count
+            logger.info(f"Cleared {bet_count} bets for today's games")
+        
+        if msg_count > 0:
+            # Delete pending messages for today's games
+            db.execute("""
+                DELETE FROM message_log 
+                WHERE game_id IN (
+                    SELECT game_id FROM games WHERE game_date = %s
+                ) AND delivery_status = 'pending'
+            """, (today,))
+            logger.info(f"Cleared {msg_count} pending messages for today's games")
+        
+        return bet_count
     
     def cancel_active_bets(self) -> int:
         """Mark all active bets as cancelled (safer than deletion)"""
@@ -245,5 +273,72 @@ class BetManager:
         
         if count > 0:
             logger.info(f"Auto-updated {count} old bets to Completed status")
+        
+        return count
+    
+    def view_scheduled_messages(self) -> Dict:
+        """Get all scheduled/pending messages with details"""
+        messages = db.fetch_dict("""
+            SELECT 
+                m.message_id,
+                m.community_id,
+                c.community_name,
+                m.message_type,
+                m.message_title,
+                m.message_content,
+                m.scheduled_send_time,
+                m.delivery_status,
+                m.bet_id,
+                m.game_id,
+                m.priority_level,
+                g.game_date,
+                ht.team_name as home_team,
+                at.team_name as away_team
+            FROM message_log m
+            JOIN communities c ON m.community_id = c.community_id
+            LEFT JOIN games g ON m.game_id = g.game_id
+            LEFT JOIN teams ht ON g.home_team_id = ht.team_id
+            LEFT JOIN teams at ON g.away_team_id = at.team_id
+            WHERE m.delivery_status = 'pending'
+            ORDER BY m.scheduled_send_time ASC
+        """)
+        
+        # Get summary by type
+        summary = db.fetch_dict("""
+            SELECT message_type, COUNT(*) as count
+            FROM message_log 
+            WHERE delivery_status = 'pending'
+            GROUP BY message_type
+            ORDER BY message_type
+        """)
+        
+        return {
+            'messages': messages,
+            'summary': summary,
+            'total': len(messages)
+        }
+    
+    def clear_scheduled_messages(self, message_type: str = None) -> int:
+        """Clear pending messages, optionally filtered by type"""
+        if message_type:
+            count = db.fetchone("""
+                SELECT COUNT(*) FROM message_log 
+                WHERE delivery_status = 'pending' AND message_type = %s
+            """, (message_type,))[0]
+            
+            if count > 0:
+                db.execute("""
+                    DELETE FROM message_log 
+                    WHERE delivery_status = 'pending' AND message_type = %s
+                """, (message_type,))
+                logger.info(f"Cleared {count} pending {message_type} messages")
+        else:
+            count = db.fetchone("""
+                SELECT COUNT(*) FROM message_log WHERE delivery_status = 'pending'
+            """)[0]
+            
+            if count > 0:
+                db.execute("DELETE FROM message_log WHERE delivery_status = 'pending'")
+                logger.info(f"Cleared {count} pending messages")
         
         return count

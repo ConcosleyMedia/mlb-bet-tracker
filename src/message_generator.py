@@ -232,41 +232,43 @@ class MessageGenerator:
         else:
             return f"{bet.get('team_name', 'Pick')} $1,000 SLIP 👇"
     
-    def generate_streak_message(self, bet: Dict, community: str) -> Dict:
-        """Generate winning streak message"""
+    def generate_streak_message(self, data: Dict, community: str) -> Dict:
+        """Generate streak notification message"""
         
         style = self.tier_styles[community]
+        consecutive_wins = data.get('consecutive_wins', 3)
+        source_community = data.get('source_community', community)
         
         prompt = f"""
-        Create an {style['tone']} winning streak celebration message.
+        Create a {style['tone']} winning streak announcement.
         
         Context:
-        - Multiple wins in a row
-        - Community: {community}
-        - Building momentum and excitement
+        - Streak: {consecutive_wins} consecutive wins
+        - Source: {source_community} {'(higher tier)' if source_community != community else ''}
+        - Recent wins: {data.get('recent_wins', [])}
         
         Style guidelines:
-        - Tone: {style['tone']} but EXCITED about the streak
-        - Use emojis: {style['emojis']} plus streak emojis
-        - Show the hot streak momentum
-        - Keep it engaging and build hype
+        - Tone: {style['tone']}
+        - Use fire/streak emojis: 🔥🎯⚡
+        - If cross-tier: mention the higher tier's success
+        - If same-tier: celebrate together
+        - Include CTA if appropriate for tier
         
         Format as:
-        TITLE: [title]
-        CONTENT: [content]
+        TITLE: [exciting streak title]
+        CONTENT: [streak celebration message]
         """
         
         try:
             response = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You create exciting winning streak messages for sports betting communities."},
+                    {"role": "system", "content": "You create exciting winning streak announcements."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.9
             )
             
-            # Parse response
             text = response.choices[0].message.content
             lines = text.split('\n')
             
@@ -279,77 +281,76 @@ class MessageGenerator:
                 elif line.startswith('CONTENT:'):
                     content = line.replace('CONTENT:', '').strip()
             
+            # Add tier-specific CTA if cross-tier
+            if source_community != community and community == 'StatEdge':
+                content += f"\n\nWant access to {source_community} picks? Upgrade now!"
+            
             return {
-                'title': title or f"🔥 HOT STREAK! {style['emojis']}",
-                'content': content or f"We're on fire! {style['emojis']} The wins keep coming!"
+                'title': title or f"🔥 {consecutive_wins}-BET WIN STREAK!",
+                'content': content or f"We're on fire with {consecutive_wins} straight wins!"
             }
             
         except Exception as e:
             logger.error(f"OpenAI streak generation failed: {e}")
             return {
-                'title': f"🔥 HOT STREAK! {style['emojis']}",
-                'content': f"We're on fire! {style['emojis']} The wins keep coming!"
+                'title': f"🔥 {consecutive_wins}-BET WIN STREAK!",
+                'content': f"{source_community} is on fire with {consecutive_wins} straight wins! 🎯"
             }
     
-    def generate_marketing_message(self, bet: Dict, community: str) -> Dict:
-        """Generate marketing/promotional message"""
+    def generate_marketing_message(self, data: Dict, community: str) -> Dict:
+        """Generate marketing/upsell message"""
         
         style = self.tier_styles[community]
+        message_variant = data.get('variant', 'upsell')
         
-        prompt = f"""
-        Create a {style['tone']} marketing message for the community.
+        # Pre-written marketing messages by tier
+        if community == 'StatEdge':
+            # Free tier upsells
+            if message_variant == 'trial':
+                return {
+                    'title': '🔓 2-Day VIP Trial Available!',
+                    'content': 'Get instant access to StatEdge+ premium picks!\n\n'
+                              '✅ All VIP picks for 48 hours\n'
+                              '✅ Live bet tracking\n'
+                              '✅ Win rate: 67% this month\n\n'
+                              'Start your trial now → Link in bio'
+                }
+            elif message_variant == 'results':
+                return {
+                    'title': '💎 See What Premium Members Won Today',
+                    'content': f"StatEdge+ members hit {data.get('wins', 3)} winners today!\n\n"
+                              f"{data.get('examples', '• Multiple winning bets listed here')}\n\n"
+                              'Upgrade for tomorrow\'s picks!'
+                }
+            else:
+                return {
+                    'title': '🚀 Level Up Your Betting',
+                    'content': 'Free picks are great, but VIP is better!\n\n'
+                              'StatEdge+ Features:\n'
+                              '• 3-4 daily premium picks\n'
+                              '• Advanced analytics\n'
+                              '• Priority support\n\n'
+                              'Try 2 days FREE → Link in bio'
+                }
         
-        Community: {community}
-        
-        Style guidelines:
-        - Tone: {style['tone']}
-        - Use emojis: {style['emojis']}
-        - Focus on community value and benefits
-        - Include call-to-action if appropriate
-        - Keep it authentic and engaging
-        
-        Format as:
-        TITLE: [title]
-        CONTENT: [content]
-        """
-        
-        try:
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You create authentic marketing messages for sports betting communities."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7
-            )
-            
-            # Parse response
-            text = response.choices[0].message.content
-            lines = text.split('\n')
-            
-            title = ""
-            content = ""
-            
-            for line in lines:
-                if line.startswith('TITLE:'):
-                    title = line.replace('TITLE:', '').strip()
-                elif line.startswith('CONTENT:'):
-                    content = line.replace('CONTENT:', '').strip()
-            
-            # Add CTA for free tier
-            if community == 'StatEdge' and style['cta']:
-                content += f"\n\n{style['cta']}"
-            
+        elif community == 'StatEdge+':
+            # Plus tier teasers
             return {
-                'title': title or f"📢 Community Update {style['emojis']}",
-                'content': content or f"Thanks for being part of our {community} community! {style['emojis']}"
+                'title': '🌟 Premium Pick Preview',
+                'content': 'Premium members getting exclusive access:\n\n'
+                          '🔒 [High-Value Pick Locked]\n'
+                          'Confidence: ⭐⭐⭐⭐⭐\n'
+                          'Value: $19.99\n\n'
+                          'Unlock with Premium membership!'
             }
-            
-        except Exception as e:
-            logger.error(f"OpenAI marketing generation failed: {e}")
+        
+        else:  # Premium
+            # Premium exclusive content
             return {
-                'title': f"📢 Community Update {style['emojis']}",
-                'content': f"Thanks for being part of our {community} community! {style['emojis']}"
+                'title': '🎁 FREE Bonus Pick - Premium Only!',
+                'content': 'Exclusive for Premium members:\n\n'
+                          f"⚾ {data.get('bonus_pick', 'Special analytics-based pick')}\n\n"
+                          'This bonus pick is FREE for Premium members only!'
             }
 
     def generate_smart_milestone_message(self, bet: Dict, milestone_type: str, community: str) -> Dict:

@@ -213,6 +213,105 @@ class MLBBettingSystem:
         else:
             print("Invalid option")
     
+    def view_scheduled_messages(self):
+        """View all scheduled/pending messages"""
+        print("\n📨 Scheduled Messages")
+        print("=" * 50)
+        
+        message_data = self.bet_manager.view_scheduled_messages()
+        
+        if message_data['total'] == 0:
+            print("No scheduled messages found")
+            return
+        
+        # Show summary
+        print(f"Total pending messages: {message_data['total']}")
+        print("\nBy type:")
+        for summary in message_data['summary']:
+            print(f"  {summary['message_type']}: {summary['count']} messages")
+        
+        print("\n" + "=" * 80)
+        print("MESSAGE DETAILS:")
+        print("=" * 80)
+        
+        for msg in message_data['messages'][:20]:  # Show first 20
+            print(f"\n📨 ID: {msg['message_id']} | Type: {msg['message_type']} | {msg['community_name']}")
+            print(f"⏰ Scheduled: {msg['scheduled_send_time']}")
+            print(f"📝 Title: {msg['message_title']}")
+            if msg['message_content']:
+                # Show first 150 characters of content
+                content = msg['message_content']
+                if len(content) > 150:
+                    content = content[:150] + "..."
+                print(f"💬 Content: {content}")
+            
+            # Show game info if available
+            if msg['home_team'] and msg['away_team']:
+                print(f"⚾ Game: {msg['away_team']} @ {msg['home_team']} ({msg['game_date']})")
+            
+            print("-" * 80)
+        
+        if len(message_data['messages']) > 20:
+            print(f"\n... and {len(message_data['messages']) - 20} more messages")
+    
+    def clear_scheduled_messages(self):
+        """Clear scheduled messages menu"""
+        print("\n🗑️ Clear Scheduled Messages")
+        print("=" * 50)
+        
+        message_data = self.bet_manager.view_scheduled_messages()
+        
+        if message_data['total'] == 0:
+            print("No scheduled messages to clear")
+            return
+        
+        print(f"Total pending messages: {message_data['total']}")
+        print("\nBy type:")
+        for summary in message_data['summary']:
+            print(f"  {summary['message_type']}: {summary['count']} messages")
+        
+        print("\nOptions:")
+        print("1. Clear all pending messages")
+        print("2. Clear by message type")
+        print("3. Cancel")
+        
+        choice = input("\nSelect option (1-3): ")
+        
+        if choice == '1':
+            confirm = input(f"\n❓ Clear all {message_data['total']} pending messages? (yes/no): ")
+            if confirm.lower() == 'yes':
+                cleared = self.bet_manager.clear_scheduled_messages()
+                print(f"✅ Cleared {cleared} messages")
+            else:
+                print("❌ Cancelled")
+                
+        elif choice == '2':
+            print("\nAvailable message types:")
+            for i, summary in enumerate(message_data['summary'], 1):
+                print(f"{i}. {summary['message_type']} ({summary['count']} messages)")
+            
+            try:
+                type_choice = int(input(f"\nSelect type (1-{len(message_data['summary'])}): "))
+                if 1 <= type_choice <= len(message_data['summary']):
+                    selected_type = message_data['summary'][type_choice - 1]['message_type']
+                    count = message_data['summary'][type_choice - 1]['count']
+                    
+                    confirm = input(f"\n❓ Clear {count} '{selected_type}' messages? (yes/no): ")
+                    if confirm.lower() == 'yes':
+                        cleared = self.bet_manager.clear_scheduled_messages(selected_type)
+                        print(f"✅ Cleared {cleared} {selected_type} messages")
+                    else:
+                        print("❌ Cancelled")
+                else:
+                    print("❌ Invalid selection")
+            except ValueError:
+                print("❌ Invalid input")
+                
+        elif choice == '3':
+            return
+        else:
+            print("❌ Invalid option")
+    
     def run(self):
         """Main application loop"""
         if not self.setup():
@@ -234,9 +333,11 @@ class MLBBettingSystem:
             print("4. View Active Bets")
             print("5. Clear Bets")
             print("6. Track Live Games")
-            print("7. Exit")
+            print("7. View Scheduled Messages")
+            print("8. Clear Scheduled Messages")
+            print("9. Exit")
             
-            choice = input("\nSelect option (1-7): ")
+            choice = input("\nSelect option (1-9): ")
             
             if choice == '1':
                 self.update_data()
@@ -254,6 +355,10 @@ class MLBBettingSystem:
             elif choice == '6':
                 self.track_live_games()
             elif choice == '7':
+                self.view_scheduled_messages()
+            elif choice == '8':
+                self.clear_scheduled_messages()
+            elif choice == '9':
                 print("\n👋 Goodbye!")
                 break
             else:

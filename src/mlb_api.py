@@ -211,7 +211,7 @@ class MLBAPI:
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 game['gamePk'],
-                datetime.now().date(),
+                datetime.fromisoformat(game['officialDate']).date(),
                 eastern_game_time,  # Now using converted Eastern Time!
                 home['id'],
                 away['id'],
