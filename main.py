@@ -266,20 +266,38 @@ class MLBBettingSystem:
         
         from src.live_tracker import LiveGameTracker
         tracker = LiveGameTracker()
-        tracker.track_all_live_games()
         
-        # Show summary
-        live_bets = tracker.get_active_game_bets()
-        if live_bets:
-            print(f"\n📈 Tracking {len(live_bets)} active bets")
-            for bet in live_bets[:10]:
-                current_val = bet.get('result_value') or 0
-                target_val = bet.get('target_value') or 0
-                print(f"  • {bet.get('player_name', 'Team bet')}: "
-                      f"{current_val}/{target_val}")
-        else:
-            print("\n💤 No live games with active bets right now")
-            print("   When games go live, they'll be tracked automatically!")
+        try:
+            summary = tracker.track_all_live_games()
+            
+            # Show tracking results
+            print(f"\n✅ Tracking complete!")
+            print(f"  Games tracked: {summary['games_tracked']}")
+            print(f"  Bets checked: {summary['bets_checked']}")
+            print(f"  Bets updated: {summary['bets_updated']}")
+            print(f"  Messages queued: {summary['messages_queued']}")
+            print(f"  Duration: {summary.get('duration_seconds', 0):.1f}s")
+            
+            # Show winners if any
+            if summary['winners']:
+                print(f"\n🎉 WINNERS ({len(summary['winners'])}):")
+                for winner in summary['winners']:
+                    print(f"  ✅ {winner['player']} ({winner['community']})")
+            
+            # Show errors if any
+            if summary['errors']:
+                print(f"\n⚠️  Errors ({len(summary['errors'])}):")
+                for error in summary['errors'][:3]:  # Show first 3 errors
+                    print(f"  ❌ {error}")
+            
+            # Show live bets status
+            if summary['bets_checked'] == 0:
+                print("\n💤 No live games with active bets right now")
+                print("   When games go live, they'll be tracked automatically!")
+            
+        except Exception as e:
+            print(f"\n❌ Tracking failed: {e}")
+            logger.error(f"Live tracking error: {e}")
 
 
 if __name__ == "__main__":
