@@ -1,0 +1,12 @@
+# Core dependencies
+psycopg2-binary
+python-dotenv
+requests
+openai==0.28.1
+
+# Optional - install these separately if needed
+# pandas
+# numpy
+# schedule
+# pytest
+# loguru
