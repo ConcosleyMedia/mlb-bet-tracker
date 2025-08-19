@@ -233,9 +233,10 @@ class MLBBettingSystem:
             print("3. View Today's Bets")
             print("4. View Active Bets")
             print("5. Clear Bets")
-            print("6. Exit")
+            print("6. Track Live Games")
+            print("7. Exit")
             
-            choice = input("\nSelect option (1-6): ")
+            choice = input("\nSelect option (1-7): ")
             
             if choice == '1':
                 self.update_data()
@@ -251,10 +252,34 @@ class MLBBettingSystem:
             elif choice == '5':
                 self.clear_bets_menu()
             elif choice == '6':
+                self.track_live_games()
+            elif choice == '7':
                 print("\n👋 Goodbye!")
                 break
             else:
                 print("Invalid option")
+    
+    def track_live_games(self):
+        """Track live games and bet progress"""
+        print("\n📊 Live Game Tracking")
+        print("=" * 50)
+        
+        from src.live_tracker import LiveGameTracker
+        tracker = LiveGameTracker()
+        tracker.track_all_live_games()
+        
+        # Show summary
+        live_bets = tracker.get_active_game_bets()
+        if live_bets:
+            print(f"\n📈 Tracking {len(live_bets)} active bets")
+            for bet in live_bets[:10]:
+                current_val = bet.get('result_value') or 0
+                target_val = bet.get('target_value') or 0
+                print(f"  • {bet.get('player_name', 'Team bet')}: "
+                      f"{current_val}/{target_val}")
+        else:
+            print("\n💤 No live games with active bets right now")
+            print("   When games go live, they'll be tracked automatically!")
 
 
 if __name__ == "__main__":

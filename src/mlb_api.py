@@ -1,7 +1,7 @@
 """MLB Stats API integration"""
 
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 import logging
 from src.config import Config
@@ -16,6 +16,23 @@ class MLBAPI:
     def __init__(self):
         self.base_url = Config.MLB_API_BASE_URL
         self.session = requests.Session()
+    
+    def _convert_utc_to_eastern(self, utc_time_str: str) -> datetime:
+        """Convert MLB API UTC time to Eastern Time"""
+        try:
+            # Parse MLB API time format: 2025-08-19T18:20:00Z
+            utc_time = datetime.fromisoformat(utc_time_str.replace('Z', '+00:00'))
+            
+            # Convert to Eastern Time (UTC-4 for EDT, UTC-5 for EST)
+            # For now, assume EDT (summer time) - could be improved with proper timezone library
+            eastern_time = utc_time - timedelta(hours=4)  # EDT conversion
+            
+            return eastern_time
+            
+        except Exception as e:
+            logger.error(f"Failed to convert UTC time {utc_time_str}: {e}")
+            # Fallback: return current time
+            return datetime.now()
     
     def _get(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
         """Make GET request to MLB API"""
@@ -175,6 +192,9 @@ class MLBAPI:
                 if not venue_exists:
                     venue_id = None  # Don't reference non-existent venue
             
+            # Convert game time from UTC to Eastern Time
+            eastern_game_time = self._convert_utc_to_eastern(game['gameDate'])
+            
             db.execute("""
                 INSERT INTO games (
                     game_id, game_date, game_time,
@@ -192,7 +212,7 @@ class MLBAPI:
             """, (
                 game['gamePk'],
                 datetime.now().date(),
-                game['gameDate'],
+                eastern_game_time,  # Now using converted Eastern Time!
                 home['id'],
                 away['id'],
                 venue_id,
