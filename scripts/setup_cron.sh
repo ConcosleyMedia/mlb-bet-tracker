@@ -29,7 +29,7 @@ CRON_JOBS="
 */3 12-23 * * * cd $PROJECT_DIR && ./scripts/track_live.py >> logs/cron_tracking.log 2>&1
 
 # MLB Betting System - Message Processing (runs every minute)
-* * * * * cd $PROJECT_DIR && ./scripts/process_messages.py >> logs/cron_messages.log 2>&1
+* * * * * cd $PROJECT_DIR && python -c "import asyncio; from scripts.process_messages import main; asyncio.run(main())" >> logs/cron_messages.log 2>&1
 
 # MLB Betting System - Daily Data Refresh (6 AM ET)
 0 6 * * * cd $PROJECT_DIR && python -c \"from src.mlb_api import MLBAPI; MLBAPI().update_todays_games()\" >> logs/cron_daily.log 2>&1
