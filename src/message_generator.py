@@ -105,94 +105,63 @@ class MessageGenerator:
         style = self.tier_styles[community]
         milestone = bet.get('milestone_percentage', 0)
         
+        # Create human betting language based on progress
+        current = bet.get('current_value', 0)
+        target = bet.get('target_value', 1)
+        player = bet.get('player_name', bet.get('team_name', 'Our pick'))
+        bet_type = bet.get('bet_type', 'bet')
+        
+        # Fix remaining calculation with proper betting math
+        # For over bets: need to exceed target (1.5 → need 2 total, 2.5 → need 3 total)
+        import math
+        if current and target:
+            # Calculate how many total needed to win
+            needed_total = math.ceil(target) if target != int(target) else int(target) + 1
+            remaining = max(0, needed_total - int(current))
+        else:
+            remaining = 1
+        
+        # Determine progress stage for human language
+        if current >= target:
+            progress_stage = "WE HIT! Cashing baby!"
+        elif current == 0:
+            progress_stage = "just getting started"
+        elif current >= target * 0.9:
+            progress_stage = "SO CLOSE! Almost there"
+        elif current >= target * 0.5:
+            progress_stage = "halfway there"
+        else:
+            progress_stage = "building momentum"
+        
         prompt = f"""
-        Create a {style['tone']} progress update for a betting milestone.
+        Create a {style['tone']} live betting update that sounds like a real person hyping their friends.
         
-        Bet details:
-        - Team: {bet.get('team_name', bet.get('player_name'))}
-        - Type: {bet['bet_type']}
-        - Progress: {milestone}% complete
-        - Current value: {bet.get('current_value', 'tracking')}
-        - Target: {bet.get('target_value', 'unknown')}
+        Situation:
+        - Player: {player}
+        - Bet: {bet_type}
+        - Current: {int(current) if current else 0}
+        - Need: {int(target) if target else 1} total
+        - Remaining: {remaining} more to hit
+        - Stage: {progress_stage}
         
-        Style guidelines:
-        - Tone: {style['tone']}
-        - Use emojis: {style['emojis']}
-        - Show excitement for progress
-        - Keep it engaging and short
+        Write like a betting enthusiast, NOT a robot:
+        - NO percentages or "% complete"
+        - Use "halfway there", "almost there", "1 more to go"
+        - Add excitement: "let's go!", "we're cooking!", "cashing baby!"
+        - Sound human and hyped
+        - Tone: {style['tone']} but conversational
+        - Emojis: {style['emojis']}
         
         Format as:
-        TITLE: [title]
-        CONTENT: [content]
+        TITLE: [exciting human title]
+        CONTENT: [hype message like you're texting friends]
         """
         
         try:
             response = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You create exciting sports betting progress updates."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.8
-            )
-            
-            # Parse response
-            text = response.choices[0].message.content
-            lines = text.split('\n')
-            
-            title = ""
-            content = ""
-            
-            for line in lines:
-                if line.startswith('TITLE:'):
-                    title = line.replace('TITLE:', '').strip()
-                elif line.startswith('CONTENT:'):
-                    content = line.replace('CONTENT:', '').strip()
-            
-            return {
-                'title': title or f"{milestone}% Complete! {style['emojis']}",
-                'content': content or f"Our pick is {milestone}% of the way there!"
-            }
-            
-        except Exception as e:
-            logger.error(f"OpenAI milestone generation failed: {e}")
-            return {
-                'title': f"{milestone}% Complete! {style['emojis']}",
-                'content': f"Our pick is {milestone}% of the way there!"
-            }
-    
-    def generate_win_message(self, bet: Dict, community: str) -> Dict:
-        """Generate victory celebration message"""
-        
-        style = self.tier_styles[community]
-        
-        prompt = f"""
-        Create an {style['tone']} VICTORY celebration message.
-        
-        Winning bet details:
-        - Team: {bet.get('team_name', bet.get('player_name'))}
-        - Type: {bet['bet_type']}
-        - Odds: {bet['odds']}
-        - Units: {bet['units']}
-        - Final result: WON
-        
-        Style guidelines:
-        - Tone: {style['tone']} but VERY EXCITED
-        - Use emojis: {style['emojis']} plus victory emojis
-        - Celebrate the win enthusiastically
-        - For Premium: Show value won
-        - Keep it hype and authentic
-        
-        Format as:
-        TITLE: [title]
-        CONTENT: [content]
-        """
-        
-        try:
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You create hype victory celebrations for sports betting wins."},
+                    {"role": "system", "content": "You're a hype betting enthusiast texting friends about live bets. Sound human, excited, and conversational. NO corporate language or percentages."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.9
@@ -211,17 +180,55 @@ class MessageGenerator:
                 elif line.startswith('CONTENT:'):
                     content = line.replace('CONTENT:', '').strip()
             
+            # Create human fallback based on progress
+            if current >= target:
+                fallback_title = f"WE HIT! {style['emojis']}"
+                fallback_content = f"{player} just cashed our {bet_type} bet! Let's go! {style['emojis']}"
+            elif remaining == 1:
+                fallback_title = f"1 MORE TO GO! {style['emojis']}"
+                fallback_content = f"{player} needs just 1 more {bet_type} and we're cashing! {style['emojis']}"
+            elif progress_stage == "halfway there":
+                fallback_title = f"Halfway there! {style['emojis']}"
+                fallback_content = f"{player} got {int(current)}! {remaining} more to go and we're golden! {style['emojis']}"
+            else:
+                fallback_title = f"{player} cooking! {style['emojis']}"
+                fallback_content = f"Tracking {player} - {remaining} {bet_type} to go! Let's ride! {style['emojis']}"
+            
             return {
-                'title': title or f"WINNER! {style['emojis']} 🎉",
-                'content': content or f"Our pick just hit! {style['emojis']} Another W for the books!"
+                'title': title or fallback_title,
+                'content': content or fallback_content
             }
             
         except Exception as e:
-            logger.error(f"OpenAI win generation failed: {e}")
+            logger.error(f"OpenAI milestone generation failed: {e}")
             return {
-                'title': f"WINNER! {style['emojis']} 🎉",
-                'content': f"Our pick just hit! {style['emojis']} Another W for the books!"
+                'title': f"{milestone}% Complete! {style['emojis']}",
+                'content': f"Our pick is {milestone}% of the way there!"
             }
+    
+    def generate_win_message(self, bet: Dict, community: str) -> Dict:
+        """Generate simple 1-sentence victory message"""
+        
+        style = self.tier_styles[community]
+        
+        # Simple 1-sentence win messages
+        team_or_player = bet.get('team_name', bet.get('player_name', 'Our pick'))
+        bet_type = bet.get('bet_type', 'bet')
+        odds = bet.get('odds', '+100')
+        units = bet.get('units', 1)
+        
+        # Create simple, direct win message
+        if bet_type.lower() == 'total':
+            content = f"{team_or_player} Total {odds} ({units}u) ✅ HITS!"
+        elif bet_type.lower() in ['moneyline', 'ml']:
+            content = f"{team_or_player} ML {odds} ({units}u) ✅ CASHES!"
+        else:
+            content = f"{team_or_player} {bet_type} {odds} ({units}u) ✅ WINNER!"
+        
+        return {
+            'title': f"🎉 WINNER",
+            'content': content
+        }
     
     def _get_fallback_title(self, bet: Dict, community: str) -> str:
         """Fallback title if OpenAI fails"""

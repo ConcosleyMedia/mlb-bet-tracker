@@ -33,26 +33,30 @@ async def process_message_queue():
     """Process pending messages for Whop"""
     logger = logging.getLogger(__name__)
     
-    # Get pending messages with bet details
+    # Get pending messages with optional bet details and tracking data
     messages = db.fetch_dict("""
         SELECT 
             m.*,
             c.community_name,
             b.raw_input,
             b.bet_type,
+            b.target_value,
             b.odds,
             b.units,
             b.player_id,
             b.team_id,
             p.full_name as player_name,
-            t.team_name
+            t.team_name,
+            bt.current_value,
+            bt.progress_percentage
         FROM message_log m
         JOIN communities c ON m.community_id = c.community_id
-        JOIN bets b ON m.bet_id = b.bet_id
+        LEFT JOIN bets b ON m.bet_id = b.bet_id
         LEFT JOIN players p ON b.player_id = p.player_id
         LEFT JOIN teams t ON b.team_id = t.team_id
+        LEFT JOIN bet_tracking bt ON b.bet_id = bt.bet_id
         WHERE m.delivery_status = 'pending'
-        AND m.scheduled_send_time <= NOW()
+        AND m.scheduled_send_time <= TIMEZONE('America/New_York', NOW())
         ORDER BY m.priority_level DESC, m.created_at ASC
         LIMIT 10
     """)
@@ -78,14 +82,30 @@ async def process_message_queue():
                 
                 # Generate message content based on type
                 if msg['message_type'] == 'pregame':
-                    generated = generator.generate_pregame_message(msg, msg['community_name'])
-                elif msg['message_type'] == 'milestone':
-                    generated = generator.generate_milestone_message(msg, msg['community_name'])
-                elif msg['message_type'] == 'won':
-                    generated = generator.generate_win_message(msg, msg['community_name'])
+                    # Pre-game messages already have good content, use it directly
+                    generated = {
+                        'title': msg['message_title'],
+                        'content': msg['message_content']
+                    }
+                elif msg['message_type'] == 'milestone' and msg['bet_id']:
+                    # Use pre-generated milestone content directly (already crafted in live tracker)
+                    generated = {
+                        'title': msg['message_title'],
+                        'content': msg['message_content']
+                    }
+                elif msg['message_type'] == 'won' and msg['bet_id']:
+                    # Use simple win format directly (no OpenAI)
+                    generated = {
+                        'title': msg['message_title'],
+                        'content': msg['message_content']
+                    }
                 elif msg['message_type'] == 'streak':
-                    generated = generator.generate_streak_message(msg, msg['community_name'])
-                elif msg['message_type'] == 'marketing':
+                    # Streak messages already have good content, use it directly
+                    generated = {
+                        'title': msg['message_title'],
+                        'content': msg['message_content']
+                    }
+                elif msg['message_type'] == 'marketing' and msg['bet_id']:
                     generated = generator.generate_marketing_message(msg, msg['community_name'])
                 else:
                     # Use pre-generated content
@@ -98,11 +118,19 @@ async def process_message_queue():
                 success = False
                 
                 if msg['community_name'] == 'StatEdge Premium':
-                    success = await whop.post_premium_bet(
-                        title=generated['title'],
-                        content=generated['content'],
-                        paywall_amount=19.99
-                    )
+                    # Only use paywall for pregame picks, not live updates/wins
+                    if msg['message_type'] == 'pregame':
+                        success = await whop.post_premium_bet(
+                            title=generated['title'],
+                            content=generated['content'],
+                            paywall_amount=19.99
+                        )
+                    else:
+                        # Live updates and wins: no paywall
+                        success = await whop.post_premium_bet(
+                            title=generated['title'],
+                            content=generated['content']
+                        )
                 elif msg['community_name'] == 'StatEdge+':
                     success = await whop.post_vip_bet(
                         title=generated['title'],

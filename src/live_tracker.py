@@ -33,6 +33,7 @@ class LiveGameTracker:
                 b.units,
                 b.community_id,
                 b.raw_input,
+                b.status,
                 g.status as game_status,
                 g.inning,
                 g.inning_state,
@@ -49,8 +50,8 @@ class LiveGameTracker:
             LEFT JOIN players p ON b.player_id = p.player_id
             LEFT JOIN bet_tracking bt ON b.bet_id = bt.bet_id
             WHERE b.status IN ('Pending', 'Live')
-            AND g.game_date = CURRENT_DATE
-            AND g.status IN ('In Progress', 'Live', 'Warmup')
+            AND g.game_date = DATE(TIMEZONE('America/New_York', NOW()))
+            AND g.status IN ('In Progress', 'Live', 'Warmup', 'Pre-Game', 'Scheduled')
             ORDER BY b.community_id, b.bet_id
         """)
     
@@ -135,9 +136,9 @@ class LiveGameTracker:
                     db.execute("""
                         INSERT INTO player_game_stats (
                             game_id, player_id, at_bats, hits, singles,
-                            doubles, triples, home_runs, total_bases,
+                            doubles, triples, home_runs,
                             runs, rbis, walks, strikeouts, stolen_bases
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (game_id, player_id) DO UPDATE SET
                             at_bats = EXCLUDED.at_bats,
                             hits = EXCLUDED.hits,
@@ -145,7 +146,6 @@ class LiveGameTracker:
                             doubles = EXCLUDED.doubles,
                             triples = EXCLUDED.triples,
                             home_runs = EXCLUDED.home_runs,
-                            total_bases = EXCLUDED.total_bases,
                             runs = EXCLUDED.runs,
                             rbis = EXCLUDED.rbis,
                             walks = EXCLUDED.walks,
@@ -160,7 +160,6 @@ class LiveGameTracker:
                         batting.get('doubles', 0),
                         batting.get('triples', 0),
                         batting.get('homeRuns', 0),
-                        total_bases,
                         batting.get('runs', 0),
                         batting.get('rbi', 0),
                         batting.get('baseOnBalls', 0),
@@ -172,7 +171,13 @@ class LiveGameTracker:
                 if 'pitching' in stats and stats['pitching']:
                     pitching = stats['pitching']
                     
-                    # Ensure pitcher exists in pitchers table
+                    # Ensure pitcher exists in players table first, then pitchers table
+                    db.execute("""
+                        INSERT INTO players (player_id, full_name, first_name, last_name)
+                        VALUES (%s, 'Unknown Pitcher', 'Unknown', 'Pitcher')
+                        ON CONFLICT (player_id) DO NOTHING
+                    """, (player_id,))
+                    
                     db.execute("""
                         INSERT INTO pitchers (pitcher_id)
                         VALUES (%s)
@@ -229,6 +234,8 @@ class LiveGameTracker:
             'home runs': ('player_game_stats', 'home_runs'),
             'hits': ('player_game_stats', 'hits'),
             'h': ('player_game_stats', 'hits'),
+            'total bases': ('player_game_stats', 'total_bases_calculated'),
+            'bases': ('player_game_stats', 'total_bases_calculated'),
             'ks': ('pitcher_game_stats', 'strikeouts'),
             'strikeouts': ('pitcher_game_stats', 'strikeouts'),
             'rbis': ('player_game_stats', 'rbis'),
@@ -236,8 +243,6 @@ class LiveGameTracker:
             'stolen bases': ('player_game_stats', 'stolen_bases'),
             'sb': ('player_game_stats', 'stolen_bases'),
             'runs': ('player_game_stats', 'runs'),
-            'total bases': ('player_game_stats', 'total_bases'),
-            'tb': ('player_game_stats', 'total_bases'),
             'walks': ('player_game_stats', 'walks'),
             'bb': ('player_game_stats', 'walks')
         }
@@ -247,12 +252,26 @@ class LiveGameTracker:
             table, column = stat_mapping[bet_type]
             player_column = 'pitcher_id' if table == 'pitcher_game_stats' else 'player_id'
             
-            stat = db.fetchone(f"""
-                SELECT {column} FROM {table}
-                WHERE game_id = %s AND {player_column} = %s
-            """, (game_id, player_id))
-            
-            current_value = float(stat[0]) if stat else 0.0
+            # Special handling for total bases calculation
+            if column == 'total_bases_calculated':
+                stat = db.fetchone(f"""
+                    SELECT singles, doubles, triples, home_runs FROM {table}
+                    WHERE game_id = %s AND {player_column} = %s
+                """, (game_id, player_id))
+                
+                if stat:
+                    singles, doubles, triples, home_runs = stat
+                    # Correct total bases calculation: singles(1) + doubles(2) + triples(3) + home_runs(4)
+                    current_value = float((singles or 0) * 1 + (doubles or 0) * 2 + (triples or 0) * 3 + (home_runs or 0) * 4)
+                else:
+                    current_value = 0.0
+            else:
+                stat = db.fetchone(f"""
+                    SELECT {column} FROM {table}
+                    WHERE game_id = %s AND {player_column} = %s
+                """, (game_id, player_id))
+                
+                current_value = float(stat[0]) if stat else 0.0
         
         # Team bets (moneyline, spread, total)
         elif bet_type in ['moneyline', 'ml', 'spread', 'total']:
@@ -266,11 +285,16 @@ class LiveGameTracker:
                 home_score, away_score, status, home_id, away_id = game_info
                 
                 if bet_type in ['moneyline', 'ml']:
-                    # For moneyline, current_value is 1 if winning, 0 if not
-                    if bet['team_id'] == home_id:
-                        current_value = 1 if home_score > away_score else 0
+                    # For moneyline, only mark as won if game is FINAL and team won
+                    if status in ['Final', 'Game Over', 'Completed']:
+                        # Game is final - check who won
+                        if bet['team_id'] == home_id:
+                            current_value = 1 if home_score > away_score else 0
+                        else:
+                            current_value = 1 if away_score > home_score else 0
                     else:
-                        current_value = 1 if away_score > home_score else 0
+                        # Game is still live - show progress but don't mark as hit
+                        current_value = 0
                         
                 elif bet_type == 'total':
                     current_value = home_score + away_score
@@ -284,48 +308,71 @@ class LiveGameTracker:
         
         # Get game status for smart milestone logic
         game_status = db.fetchone("""
-            SELECT inning, top_bottom, status
+            SELECT inning, inning_state, status, home_score, away_score
             FROM games WHERE game_id = %s
         """, (game_id,))
         
         game_status = {
             'inning': game_status[0] if game_status else 1,
-            'top_bottom': game_status[1] if game_status else 'top',
-            'status': game_status[2] if game_status else 'Live'
+            'inning_state': game_status[1] if game_status else 'Top',
+            'status': game_status[2] if game_status else 'Live',
+            'home_score': game_status[3] if game_status else 0,
+            'away_score': game_status[4] if game_status else 0
         }
         
         # Smart milestone detection based on bet type
         milestone_hit = None
         milestone_type = None
         
-        # Player props: Update on first occurrence
-        if bet_type in ['hrs', 'home runs', 'hits', 'h', 'rbis', 'rbi', 'sb', 'stolen bases']:
+        # Player props: Smart thresholds based on target value
+        if bet_type.lower() in ['hrs', 'home runs', 'hits', 'h', 'rbis', 'rbi', 'sb', 'stolen bases', 'total bases', 'bases']:
             target = float(bet.get('target_value', 2))
             
-            # First milestone: First occurrence (if target > 1)
-            if target > 1 and prev_value == 0 and current_value >= 1 and alerts_sent == 0:
-                milestone_hit = 1
-                milestone_type = 'first_progress'
+            # Low targets (≤2.5): Trigger on first progress
+            if target <= 2.5:
+                if prev_value == 0 and current_value >= 1 and alerts_sent == 0:
+                    milestone_hit = 1
+                    milestone_type = 'first_progress'
             
-            # Second milestone: Near miss/last chance (late innings)
-            elif target > current_value and game_status.get('inning', 1) >= 7 and alerts_sent < 2:
-                if current_value == target - 1:
-                    milestone_hit = 'last_chance'
-                    milestone_type = 'last_chance'
+            # Medium targets (2.5-4.0): Trigger at 50% and near completion
+            elif target <= 4.0:
+                if current_value >= target * 0.5 and prev_value < target * 0.5 and alerts_sent == 0:
+                    milestone_hit = current_value
+                    milestone_type = 'halfway'
+                elif current_value >= target * 0.8 and prev_value < target * 0.8 and alerts_sent < 2:
+                    milestone_hit = current_value
+                    milestone_type = 'near_complete'
+            
+            # High targets (>4.0): Use existing 50% and 80% logic
+            else:
+                if current_value >= target * 0.5 and prev_value < target * 0.5 and alerts_sent == 0:
+                    milestone_hit = current_value
+                    milestone_type = 'halfway'
+                elif current_value >= target * 0.8 and prev_value < target * 0.8 and alerts_sent < 2:
+                    milestone_hit = current_value
+                    milestone_type = 'near_complete'
         
-        # Strikeouts: Update at key thresholds
+        # Strikeouts: Smart thresholds based on target value
         elif bet_type in ['ks', 'strikeouts']:
             target = float(bet.get('target_value', 6))
             
-            # First update at ~50% (shows momentum)
-            if current_value >= target * 0.5 and prev_value < target * 0.5 and alerts_sent == 0:
-                milestone_hit = current_value
-                milestone_type = 'halfway'
+            # Low targets (≤2.5): Trigger on first strikeout
+            if target <= 2.5:
+                if prev_value == 0 and current_value >= 1 and alerts_sent == 0:
+                    milestone_hit = 1
+                    milestone_type = 'first_progress'
             
-            # Second update at 80% or last K needed
-            elif current_value >= target * 0.8 and prev_value < target * 0.8 and alerts_sent < 2:
-                milestone_hit = current_value
-                milestone_type = 'near_complete'
+            # Medium/High targets (>2.5): Use 50% and 80% thresholds
+            else:
+                # First update at ~50% (shows momentum)
+                if current_value >= target * 0.5 and prev_value < target * 0.5 and alerts_sent == 0:
+                    milestone_hit = current_value
+                    milestone_type = 'halfway'
+                
+                # Second update at 80% or last K needed
+                elif current_value >= target * 0.8 and prev_value < target * 0.8 and alerts_sent < 2:
+                    milestone_hit = current_value
+                    milestone_type = 'near_complete'
         
         # Moneyline: Update on lead changes
         elif bet_type in ['moneyline', 'ml']:
@@ -339,21 +386,31 @@ class LiveGameTracker:
                 milestone_hit = 'covering'
                 milestone_type = 'spread_covered'
         
-        # Totals: Update at 75% only
+        # Totals: Smart thresholds based on target value
         elif bet_type == 'total':
             target = float(bet.get('target_value', 8.5))
-            if current_value >= target * 0.75 and prev_value < target * 0.75 and alerts_sent == 0:
-                milestone_hit = current_value
-                milestone_type = 'nearing_total'
+            
+            # Low targets (≤2.5): Trigger on first score
+            if target <= 2.5:
+                if prev_value == 0 and current_value >= 1 and alerts_sent == 0:
+                    milestone_hit = 1
+                    milestone_type = 'first_progress'
+            
+            # Higher targets: Use 75% threshold
+            else:
+                if current_value >= target * 0.75 and prev_value < target * 0.75 and alerts_sent == 0:
+                    milestone_hit = current_value
+                    milestone_type = 'nearing_total'
         
-        # Check if bet is hit
+        # Check if bet is hit (case-insensitive operator comparison)
         is_hit = False
+        operator_lower = operator.lower() if operator else None
         
-        if operator == 'over':
+        if operator_lower == 'over':
             is_hit = current_value > target
-        elif operator == 'under':
+        elif operator_lower == 'under':
             is_hit = current_value < target
-        elif operator == 'exactly':
+        elif operator_lower == 'exactly':
             is_hit = current_value == target
         elif operator is None and bet_type in ['moneyline', 'ml']:
             is_hit = current_value == 1
@@ -396,28 +453,46 @@ class LiveGameTracker:
                 'value': progress['current_value']
             }
         
-        # Insert or update tracking
-        db.execute("""
-            INSERT INTO bet_tracking (
-                bet_id, game_id, current_value, target_value,
-                progress_percentage, is_live, last_update_inning,
-                milestone_alerts
-            ) VALUES (%s, %s, %s, %s, %s, true, %s, %s::jsonb)
-            ON CONFLICT (bet_id) DO UPDATE SET
-                current_value = EXCLUDED.current_value,
-                progress_percentage = EXCLUDED.progress_percentage,
-                last_update_inning = EXCLUDED.last_update_inning,
-                milestone_alerts = EXCLUDED.milestone_alerts,
-                updated_at = CURRENT_TIMESTAMP
-        """, (
-            bet['bet_id'],
-            bet['game_id'],
-            progress['current_value'],
-            progress['target_value'],
-            progress['progress_percentage'],
-            game_status.get('inning', 1),
-            json.dumps(milestone_alerts) if milestone_alerts else '{}'
-        ))
+        # Insert or update tracking - check if exists first
+        existing_tracking = db.fetchone(
+            "SELECT tracking_id FROM bet_tracking WHERE bet_id = %s",
+            (bet['bet_id'],)
+        )
+        
+        if existing_tracking:
+            # Update existing
+            db.execute("""
+                UPDATE bet_tracking SET
+                    current_value = %s,
+                    progress_percentage = %s,
+                    last_update_inning = %s,
+                    milestone_alerts = %s::jsonb,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE bet_id = %s
+            """, (
+                progress['current_value'],
+                progress['progress_percentage'],
+                game_status.get('inning', 1),
+                json.dumps(milestone_alerts) if milestone_alerts else '{}',
+                bet['bet_id']
+            ))
+        else:
+            # Insert new
+            db.execute("""
+                INSERT INTO bet_tracking (
+                    bet_id, game_id, current_value, target_value,
+                    progress_percentage, is_live, last_update_inning,
+                    milestone_alerts
+                ) VALUES (%s, %s, %s, %s, %s, true, %s, %s::jsonb)
+            """, (
+                bet['bet_id'],
+                bet['game_id'],
+                progress['current_value'],
+                progress['target_value'],
+                progress['progress_percentage'],
+                game_status.get('inning', 1),
+                json.dumps(milestone_alerts) if milestone_alerts else '{}'
+            ))
         
         # Update bet status
         new_status = None
@@ -450,17 +525,33 @@ class LiveGameTracker:
         
         if message_type == 'milestone' and milestone_type:
             if milestone_type == 'first_progress':
-                # Harper hits, HRs, RBIs
-                message_title = f"⚾ {bet['player_name']} gets his first!"
-                message_content = f"{bet['player_name']} has {int(progress['current_value'])} " \
-                                f"of {int(progress['target_value'])} {bet['bet_type']}! " \
-                                f"{int(progress['target_value'] - progress['current_value'])} more to go 🎯"
+                # First progress for low targets (hits, bases, etc.)
+                player_name = bet.get('player_name', 'Player')
+                bet_type_display = bet.get('bet_type', 'stat')
+                current_val = int(progress['current_value'])
+                target_val = progress['target_value']
+                
+                # Calculate remaining with proper betting math
+                import math
+                needed_total = math.ceil(target_val) if target_val != int(target_val) else int(target_val) + 1
+                remaining = max(0, needed_total - current_val)
+                
+                message_title = f"⚾ {player_name} gets the first!"
+                
+                if remaining == 1:
+                    message_content = f"{player_name} got {current_val}! Just 1 more {bet_type_display.lower()} to go! 🎯"
+                else:
+                    message_content = f"{player_name} got {current_val}! Need {remaining} more {bet_type_display.lower()} to cash! 🎯"
             
             elif milestone_type == 'halfway':
-                # Strikeouts momentum
-                message_title = f"🔥 {bet['player_name']} dealing!"
-                message_content = f"{int(progress['current_value'])} Ks through {game_status.get('inning', '?')} innings! " \
-                                f"Need {int(progress['target_value'] - progress['current_value'])} more 💪"
+                # Strikeouts momentum with bet details
+                player_name = bet.get('player_name', 'Pitcher')
+                current_val = int(progress['current_value'])
+                target_val = int(progress['target_value'])
+                remaining = target_val - current_val
+                
+                message_title = f"🔥 {player_name} Strikeouts"
+                message_content = f"{player_name} has {current_val} Ks - need {remaining} more for Over {target_val}! 💪"
             
             elif milestone_type == 'last_chance':
                 # Late game opportunity
@@ -482,23 +573,48 @@ class LiveGameTracker:
                 message_content = f"{team_name} now covering {bet.get('target_value', 'the spread')}! Keep it going 🔥"
             
             elif milestone_type == 'nearing_total':
-                # Totals update
-                message_title = f"🎯 Total runs: {int(progress['current_value'])}"
-                message_content = f"Game at {int(progress['current_value'])} runs - " \
-                                f"need {int(progress['target_value'] - progress['current_value'])} more for the over!"
+                # Totals update - simple 1-line format with game info
+                current_val = int(progress['current_value'])
+                target_val = progress['target_value']
+                
+                # Get game info to identify which total bet
+                game_info = db.fetchone("""
+                    SELECT home_team_id, away_team_id 
+                    FROM games WHERE game_id = %s
+                """, (bet['game_id'],))
+                
+                if game_info:
+                    home_team = db.fetchone("SELECT team_name FROM teams WHERE team_id = %s", (game_info[0],))
+                    away_team = db.fetchone("SELECT team_name FROM teams WHERE team_id = %s", (game_info[1],))
+                    team_names = f"{away_team[0] if away_team else 'Away'} vs {home_team[0] if home_team else 'Home'}"
+                else:
+                    team_names = "Game"
+                
+                # Use proper betting math
+                import math
+                needed_total = math.ceil(target_val) if target_val != int(target_val) else int(target_val) + 1
+                remaining = max(0, needed_total - current_val)
+                
+                message_title = f"🎯 {team_names} Total Update"
+                message_content = f"{team_names} Total at {current_val} - need {remaining} more for Over {target_val}! 🔥"
             
             elif milestone_type == 'near_complete':
-                # Near completion (strikeouts)
-                message_title = f"🔥 {bet['player_name']} - Almost there!"
-                message_content = f"{int(progress['current_value'])}/{int(progress['target_value'])} Ks! " \
-                                f"One more for the win 🎯"
+                # Near completion with bet details
+                player_name = bet.get('player_name', 'Player')
+                current_val = int(progress['current_value'])
+                target_val = int(progress['target_value'])
+                bet_type_display = bet.get('bet_type', 'stat')
+                remaining = target_val - current_val
+                
+                message_title = f"🔥 {player_name} Almost There!"
+                message_content = f"{player_name} has {current_val} {bet_type_display.lower()} - need {remaining} more for Over {target_val}! 🎯"
             
             else:
                 # Fallback
                 return
         
         elif message_type == 'won':
-            # Keep existing win message logic
+            # Win messages show bet details for all tiers (no paywall for results)
             message_title = f"🎉 WINNER - {bet.get('player_name') or bet.get('team_name', 'Bet')}"
             message_content = f"{bet['raw_input']} ✅ HITS! " \
                             f"Final: {progress['current_value']}/{progress['target_value']} " \
@@ -583,20 +699,7 @@ class LiveGameTracker:
                             # Check progress
                             progress = self.check_bet_progress(bet)
                             
-                            # Update tracking
-                            self.update_bet_tracking(bet, progress, game_update)
-                            tracking_summary['bets_updated'] += 1
-                            
-                            # Log progress
-                            logger.info(
-                                f"Bet {bet['bet_id']} ({bet['community_name']}): "
-                                f"{bet.get('player_name', 'Team')} "
-                                f"{progress['current_value']}/{progress['target_value']} "
-                                f"({progress['progress_percentage']:.0f}%) "
-                                f"{'✅ WON' if progress['is_hit'] else ''}"
-                            )
-                            
-                            # Queue messages for milestones or wins
+                            # Queue messages for milestones or wins BEFORE updating tracking
                             if progress['milestone_hit'] and not game_update.get('is_final'):
                                 self.queue_message(bet, progress, 'milestone', game_update)
                                 tracking_summary['messages_queued'] += 1
@@ -604,6 +707,42 @@ class LiveGameTracker:
                             if progress['is_hit'] and bet['status'] != 'Won':
                                 self.queue_message(bet, progress, 'won', game_update)
                                 tracking_summary['messages_queued'] += 1
+                            
+                            # Update tracking (this will increment alerts_sent count)
+                            self.update_bet_tracking(bet, progress, game_update)
+                            tracking_summary['bets_updated'] += 1
+                            
+                            # Create descriptive bet name for logging
+                            if bet.get('player_name'):
+                                bet_description = f"{bet['player_name']} {bet.get('bet_type', '')}"
+                            elif bet.get('bet_type', '').lower() in ['moneyline', 'ml']:
+                                # Try to get team name from the bet
+                                team_name = "Team"
+                                if bet.get('raw_input'):
+                                    raw = bet['raw_input'].lower()
+                                    if 'brewers' in raw: team_name = "Brewers"
+                                    elif 'cubs' in raw: team_name = "Cubs"
+                                    elif 'yankees' in raw: team_name = "Yankees"
+                                    elif 'red sox' in raw: team_name = "Red Sox"
+                                bet_description = f"{team_name} ML"
+                            elif bet.get('bet_type', '').lower() == 'total':
+                                bet_description = f"Game Total {bet.get('target_value', '')}O/U"
+                            elif bet.get('bet_type', '').lower() == 'spread':
+                                bet_description = f"Spread {bet.get('target_value', '')}"
+                            else:
+                                bet_description = f"{bet.get('bet_type', 'Team Bet')}"
+                            
+                            # Log progress
+                            logger.info(
+                                f"Bet {bet['bet_id']} ({bet['community_name']}): "
+                                f"{bet_description} "
+                                f"{progress['current_value']}/{progress['target_value']} "
+                                f"({progress['progress_percentage']:.0f}%) "
+                                f"{'✅ WON' if progress['is_hit'] else ''}"
+                            )
+                            
+                            # Add to winners list if bet hit
+                            if progress['is_hit']:
                                 tracking_summary['winners'].append({
                                     'bet_id': bet['bet_id'],
                                     'player': bet.get('player_name', 'Team bet'),
@@ -634,7 +773,7 @@ class LiveGameTracker:
                     updated_at = CURRENT_TIMESTAMP
                 FROM games g
                 WHERE b.game_id = g.game_id
-                AND b.status = 'Live'
+                AND b.status IN ('Pending', 'Live')
                 AND g.status IN ('Final', 'Game Over', 'Completed')
                 AND b.bet_id NOT IN (
                     SELECT bet_id FROM bets WHERE status = 'Won'

@@ -14,7 +14,7 @@ class Config:
     
     # APIs
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-    MLB_API_BASE_URL = os.getenv('MLB_API_BASE_URL', 'https://statsapi.mlb.com/api/v1')
+    MLB_API_BASE_URL = os.getenv('MLB_API_BASE_URL', 'https://statsapi.mlb.com/api/v1.1')
     
     # Environment
     ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
